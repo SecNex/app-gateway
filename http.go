@@ -21,6 +21,8 @@ type Route struct {
 	AllowedMethods []Method
 	AllowedIPs     []IPAddress
 	DefaultAllowed bool
+	RequiredAuth   bool
+	ForwardSubPath bool
 }
 
 type Method string
@@ -28,14 +30,41 @@ type IPAddress string
 
 // Server struct
 type Server struct {
+	port     string
 	basePath string
 	proxy    *httputil.ReverseProxy
 	routes   []Route
 }
 
+func NewRoute(path string, url string, methods []string, ips []string, defaultAllowed bool, requiredAuth bool, forwardSubPath bool) Route {
+	allowedMethods := make([]Method, len(methods))
+	for i, method := range methods {
+		log.Printf("Method: %s\n", method)
+		allowedMethods[i] = Method(method)
+	}
+
+	allowedIPs := make([]IPAddress, len(ips))
+	for i, ip := range ips {
+		allowedIPs[i] = IPAddress(ip)
+	}
+
+	log.Printf("Route: %s\n", path)
+	log.Printf("URL: %s\n", url)
+	return Route{
+		Path:           path,
+		URL:            url,
+		AllowedMethods: allowedMethods,
+		AllowedIPs:     allowedIPs,
+		DefaultAllowed: defaultAllowed,
+		RequiredAuth:   requiredAuth,
+		ForwardSubPath: forwardSubPath,
+	}
+}
+
 // NewServer creates a new server
-func NewServer(routes []Route, basePath string) *Server {
+func NewServer(port int, routes []Route, basePath string) *Server {
 	return &Server{
+		port:     fmt.Sprintf(":%d", port),
 		proxy:    &httputil.ReverseProxy{},
 		routes:   routes,
 		basePath: basePath,
@@ -47,22 +76,27 @@ func (s *Server) RunServer() {
 	for _, route := range s.routes {
 		log.Printf("Registering new route -> %s\n", route.Path)
 		log.Printf("Target for %s -> %s\n", route.Path, route.URL)
-		http.HandleFunc(fmt.Sprintf("%s/%s/", s.basePath, route.Path), s.handler)
+		log.Printf("Full route path -> %s/%s\n", s.basePath, route.Path)
+		if route.ForwardSubPath {
+			http.HandleFunc(fmt.Sprintf("%s/%s/", s.basePath, route.Path), s.handler)
+		}
+		http.HandleFunc(fmt.Sprintf("%s/%s", s.basePath, route.Path), s.handler)
 	}
 
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Fatal(http.ListenAndServe(s.port, nil))
 }
 
 // Forward forwards the request to the target URL
 func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	clientIP := r.RemoteAddr
+	method := r.Method
 
-	log.Printf("Received request from %s\n", clientIP)
+	log.Printf("Received %s request from %s - %s\n", method, clientIP, r.URL.Path)
 
 	_, routePath, remainingPath, err := s.extractPaths(r.URL.Path)
 	if err != nil {
@@ -81,12 +115,14 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "IP not allowed", http.StatusForbidden)
 		return
 	}
+	log.Printf("Client IP %s is allowed\n", clientIP)
 
+	log.Printf("Checking if method %s is allowed\n", method)
 	// Check if the method is allowed
 	if len(route.AllowedMethods) > 0 {
 		methodAllowed := false
-		for _, method := range route.AllowedMethods {
-			if Method(r.Method) == method {
+		for _, allowedMethod := range route.AllowedMethods {
+			if Method(r.Method) == allowedMethod {
 				methodAllowed = true
 				break
 			}
@@ -97,10 +133,14 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	log.Printf("Method %s is allowed\n", r.Method)
 
-	if err := s.checkAuthorizationHeader(r); err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
-		return
+	// Check if the Authorization header is required
+	if route.RequiredAuth {
+		if err := s.checkAuthorizationHeader(r); err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
 	}
 
 	targetURL, err := s.constructTargetURL(route.URL, remainingPath, r.URL.RawQuery)
@@ -236,17 +276,27 @@ func (s *Server) constructTargetURL(baseURL, remainingPath, rawQuery string) (*u
 	return targetURL, nil
 }
 
-// proxyRequest proxies the request to the target URL
 func (s *Server) proxyRequest(w http.ResponseWriter, r *http.Request, targetURL *url.URL) {
 	log.Println("proxyRequest called")
+	log.Printf("Original Request Method: %s\n", r.Method) // Logging the original method
 	s.proxy.Director = func(req *http.Request) {
 		req.URL = targetURL
 		req.Host = targetURL.Host
 		req.Header.Set("X-Forwarded-For", r.RemoteAddr)
+
+		// Ensure the request method is not altered
+		req.Method = r.Method
+
+		log.Printf("Forwarded Request Method: %s\n", req.Method) // Logging the forwarded method
 	}
 
 	rec := httptest.NewRecorder()
 	s.proxy.ServeHTTP(rec, r)
+
+	// Change 502 status to 404 before sending the response
+	if rec.Code == http.StatusBadGateway {
+		rec.Code = http.StatusNotFound
+	}
 
 	for k, v := range rec.Header() {
 		w.Header()[k] = v

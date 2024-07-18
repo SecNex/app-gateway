@@ -84,3 +84,13 @@ func (db *DB) NewAuthentication(expiresIn int) (uuid.UUID, ApiKey, error) {
 
 	return __id, ApiKey{}, nil
 }
+
+func (db *DB) GetAuthentication(id uuid.UUID) (Authentication, error) {
+	var auth Authentication
+	err := db.QueryRow("SELECT * FROM authentications WHERE id = $1", id).Scan(&auth.ID, &auth.Prefix, &auth.Key, &auth.ExpiresIn)
+	if err != nil {
+		return Authentication{}, err
+	}
+
+	return auth, nil
+}
