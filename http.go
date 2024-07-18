@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -15,9 +16,15 @@ import (
 
 // Route struct
 type Route struct {
-	Path string
-	URL  string
+	Path           string
+	URL            string
+	AllowedMethods []Method
+	AllowedIPs     []IPAddress
+	DefaultAllowed bool
 }
+
+type Method string
+type IPAddress string
 
 // Server struct
 type Server struct {
@@ -53,11 +60,9 @@ func (s *Server) RunServer() {
 // Forward forwards the request to the target URL
 func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	clientIP := r.RemoteAddr
 
-	if err := s.checkAuthorizationHeader(r); err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
-		return
-	}
+	log.Printf("Received request from %s\n", clientIP)
 
 	_, routePath, remainingPath, err := s.extractPaths(r.URL.Path)
 	if err != nil {
@@ -68,6 +73,33 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 	route, err := s.getRoute(routePath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	// Check if the client IP is allowed
+	if !s.CheckAllowedIP(route, clientIP) {
+		http.Error(w, "IP not allowed", http.StatusForbidden)
+		return
+	}
+
+	// Check if the method is allowed
+	if len(route.AllowedMethods) > 0 {
+		methodAllowed := false
+		for _, method := range route.AllowedMethods {
+			if Method(r.Method) == method {
+				methodAllowed = true
+				break
+			}
+		}
+
+		if !methodAllowed {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+	}
+
+	if err := s.checkAuthorizationHeader(r); err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 
@@ -123,6 +155,38 @@ func (s *Server) checkAuthorizationHeader(r *http.Request) error {
 	}
 
 	return nil
+}
+
+// checkAllowedIP checks if the client IP is allowed
+func (s *Server) CheckAllowedIP(r Route, clientIP string) bool {
+	log.Println("checkAllowedIP called")
+
+	// Check if IPv4 or IPv6
+	if strings.Contains(clientIP, "[") || strings.Contains(clientIP, "]") {
+		log.Println("Client uses IPv6")
+		// Get all between []
+		clientIP = strings.Split(clientIP, "[")[1]
+		clientIP = strings.Split(clientIP, "]")[0]
+	} else {
+		log.Println("Client uses IPv4")
+		// Get all before :
+		clientIP = strings.Split(clientIP, ":")[0]
+	}
+
+	log.Printf("Client IP: %s\n", clientIP)
+
+	if len(r.AllowedIPs) == 0 {
+		return r.DefaultAllowed
+	}
+
+	clientAddr := net.ParseIP(clientIP)
+	for _, ip := range r.AllowedIPs {
+		if net.ParseIP(string(ip)).Equal(clientAddr) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // extractPaths extracts the route path and the remaining path
