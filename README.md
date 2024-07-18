@@ -1,5 +1,7 @@
 # SecNex Application Gateway
 
+The SecNex Application Gateway is a reverse proxy that provides security features to protect web applications. It is designed to be a lightweight and easy to use solution for securing web applications.
+
 ## Features
 
 - Authentication
